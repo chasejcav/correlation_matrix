@@ -1,151 +1,72 @@
 import streamlit as st
+import yfinance as yf
 import pandas as pd
-import math
-from pathlib import Path
+import seaborn as sns
+import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+# Function to fetch adjusted stock prices
+def fetch_data(symbols):
+    data = {}
+    for symbol in symbols:
+        stock = yf.Ticker(symbol)
+        df = stock.history(period="max")
+        if 'Adj Close' in df.columns:
+            data[symbol] = df['Adj Close']
+        else:
+            data[symbol] = df['Close']
+    return pd.DataFrame(data)
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+# Function to calculate daily returns, correlations, and get start/end dates
+def calculate_daily_returns(data):
+    # Calculate daily returns
+    daily_returns = data.pct_change().dropna()
+    start_date = daily_returns.index.min()
+    end_date = daily_returns.index.max()
+    correlation_matrix = daily_returns.corr()
+    return correlation_matrix, start_date, end_date
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+# Function to plot heatmap with custom color scheme
+def plot_heatmap(correlation_matrix):
+    plt.figure(figsize=(10, 6))
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+    # Create a custom color map from red (negative), yellow (neutral), to green (positive)
+    cmap = LinearSegmentedColormap.from_list(
+        'custom_cmap', ['red', 'yellow', 'green'], N=256)
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
-
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
-
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
+    sns.heatmap(
+        correlation_matrix, 
+        annot=True, 
+        cmap=cmap, 
+        vmin=-1, 
+        vmax=1,
+        center=0,
+        linewidths=.5,
+        cbar=True,  # Show color bar to indicate scale
+        xticklabels=correlation_matrix.columns,
+        yticklabels=correlation_matrix.columns
     )
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+    st.pyplot(plt.gcf())
 
-    return gdp_df
+# Streamlit app
+st.title("Stock Correlation Matrix")
 
-gdp_df = get_gdp_data()
+st.write("Input stock symbols separated by commas (e.g., AAPL, MSFT, GOOGL):")
+symbols_input = st.text_input("Stock Symbols", value="AAPL, MSFT, GOOGL")
+symbols = [symbol.strip().upper() for symbol in symbols_input.split(',')]
 
-# -----------------------------------------------------------------------------
-# Draw the actual page
+if st.button("Generate Correlation Matrix"):
+    data = fetch_data(symbols)
+    if not data.empty:
+        # Calculate daily returns and correlation matrix
+        correlation_matrix, start_date, end_date = calculate_daily_returns(data)
 
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
+        # Display the start and end date
+        st.write(f"Data used from {start_date.date()} to {end_date.date()}")
 
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
+        # Display the heatmap
+        st.write("Correlation Matrix Heatmap (Based on Daily Returns):")
+        plot_heatmap(correlation_matrix)
+    else:
+        st.write("Failed to fetch data for the symbols provided.")
